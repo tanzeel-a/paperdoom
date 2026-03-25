@@ -4,7 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PaperDoom — Eye-Tracking Academic Paper Scroller</title>
-<script src="https://webgazer.cs.brown.edu/webgazer.js" defer></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📜</text></svg>">
+<!-- TensorFlow.js + Face Landmarks for reliable eye tracking -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0/dist/tf-converter.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@1.0.5/dist/face-landmarks-detection.min.js"></script>
 <style>
 /* ============================================================
    CSS RESET & VARIABLES
@@ -628,14 +633,7 @@ html, body {
   #saved-drawer { width: 100vw; }
 }
 
-/* ============================================================
-   WEBCAM PREVIEW (small, from WebGazer)
-   ============================================================ */
-#webgazerVideoFeed { display: none !important; }
-#webgazerVideoCanvas { display: none !important; }
-#webgazerFaceOverlay { display: none !important; }
-#webgazerFaceFeedbackBox { display: none !important; }
-#webgazerGazeDot { display: none !important; }
+/* Hide any debug overlays */
 </style>
 </head>
 <body>
@@ -1156,6 +1154,12 @@ html, body {
     const dot = e.target.closest('.cal-dot');
     if (!dot || dot.classList.contains('done')) return;
 
+    // Record calibration point — user is looking at this dot's screen position
+    const rect = dot.getBoundingClientRect();
+    const dotCenterX = rect.left + rect.width / 2;
+    const dotCenterY = rect.top + rect.height / 2;
+    addCalibrationPoint(dotCenterX, dotCenterY);
+
     let clicks = parseInt(dot.dataset.clicks) + 1;
     dot.dataset.clicks = clicks;
     dot.classList.add('clicked');
@@ -1181,55 +1185,194 @@ html, body {
   });
 
   /* ==========================================================
-     EYE TRACKING (WebGazer)
+     EYE TRACKING (TensorFlow.js Face Landmarks Detection)
      ========================================================== */
   let gazeAnimFrame = null;
+  let faceModel = null;
+  let videoStream = null;
+  let videoEl = null;
+  let gazeLoopRunning = false;
+
+  // Calibration data: maps screen points to iris offsets
+  const calibrationData = [];
 
   async function startEyeTracking() {
-    if (typeof webgazer === 'undefined') {
-      showError('WebGazer.js failed to load. Check your connection.');
+    // Check for TensorFlow.js
+    if (typeof faceLandmarksDetection === 'undefined' || typeof tf === 'undefined') {
+      showError('Eye-tracking libraries failed to load. Check your connection.');
       return false;
     }
 
     try {
-      await webgazer
-        .setGazeListener((data) => {
-          if (!data) return;
-          state.gazeX = data.x / window.innerWidth;
-          state.gazeY = data.y / window.innerHeight;
-        })
-        .setRegression('ridge')
-        .saveDataAcrossSessions(true)
-        .begin();
+      // Request webcam
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: 320, height: 240 }
+      });
 
-      // Hide WebGazer's built-in UI
-      webgazer.showVideoPreview(false);
-      webgazer.showPredictionPoints(false);
-      webgazer.showFaceOverlay(false);
-      webgazer.showFaceFeedbackBox(false);
+      // Create hidden video element
+      videoEl = document.createElement('video');
+      videoEl.srcObject = videoStream;
+      videoEl.autoplay = true;
+      videoEl.playsInline = true;
+      videoEl.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
+      document.body.appendChild(videoEl);
+      await videoEl.play();
+
+      // Wait for video to be ready
+      await new Promise(resolve => {
+        if (videoEl.readyState >= 2) return resolve();
+        videoEl.onloadeddata = resolve;
+      });
+
+      // Initialize TF backend
+      await tf.setBackend('webgl');
+      await tf.ready();
+
+      // Load face landmarks model (MediaPipe FaceMesh)
+      faceModel = await faceLandmarksDetection.createDetector(
+        faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
+        {
+          runtime: 'tfjs',
+          refineLandmarks: true, // Enables iris landmarks
+          maxFaces: 1,
+        }
+      );
 
       return true;
     } catch (err) {
-      console.error('WebGazer error:', err);
-      if (err.name === 'NotAllowedError') {
-        showError('Camera permission denied. Enable it in browser settings.');
+      console.error('Eye tracking init error:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'NotFoundError') {
+        showError('Camera permission denied or no webcam found.');
       } else {
         showError('Failed to start eye tracking: ' + err.message);
       }
+      stopEyeTracking();
       return false;
     }
   }
 
   function stopEyeTracking() {
-    if (typeof webgazer !== 'undefined') {
-      try { webgazer.end(); } catch {}
-    }
+    gazeLoopRunning = false;
     if (gazeAnimFrame) {
       cancelAnimationFrame(gazeAnimFrame);
       gazeAnimFrame = null;
     }
+    if (videoStream) {
+      videoStream.getTracks().forEach(t => t.stop());
+      videoStream = null;
+    }
+    if (videoEl) {
+      videoEl.remove();
+      videoEl = null;
+    }
+    faceModel = null;
     $gazeDot.classList.remove('visible');
     $scrollZones.classList.remove('visible');
+  }
+
+  // Estimate gaze from iris + face landmarks
+  // Uses iris position relative to eye corners to estimate gaze direction
+  // Landmark indices (MediaPipe FaceMesh with iris refinement):
+  //   Left eye iris center: 468, Right eye iris center: 473
+  //   Left eye corners: 33 (outer), 133 (inner)
+  //   Right eye corners: 362 (outer), 263 (inner)
+  //   Nose tip: 1, Forehead: 10, Chin: 152
+  function estimateGaze(keypoints) {
+    if (!keypoints || keypoints.length < 478) return null; // Need iris landmarks
+
+    const leftIris  = keypoints[468];
+    const rightIris = keypoints[473];
+    const leftOuter = keypoints[33];
+    const leftInner = keypoints[133];
+    const rightOuter = keypoints[362];
+    const rightInner = keypoints[263];
+    const noseTip    = keypoints[1];
+    const forehead   = keypoints[10];
+    const chin       = keypoints[152];
+
+    // Horizontal: iris position between eye corners (0=outer, 1=inner)
+    const leftEyeWidth  = Math.hypot(leftInner.x - leftOuter.x, leftInner.y - leftOuter.y);
+    const rightEyeWidth = Math.hypot(rightInner.x - rightOuter.x, rightInner.y - rightOuter.y);
+
+    const leftIrisX  = (leftIris.x - leftOuter.x) / (leftEyeWidth || 1);
+    const rightIrisX = (rightIris.x - rightOuter.x) / (rightEyeWidth || 1);
+    const avgIrisX = (leftIrisX + rightIrisX) / 2;
+
+    // Vertical: iris position relative to eye top/bottom
+    const leftEyeTop    = keypoints[159]; // Upper eyelid
+    const leftEyeBottom = keypoints[145]; // Lower eyelid
+    const rightEyeTop    = keypoints[386];
+    const rightEyeBottom = keypoints[374];
+
+    const leftEyeHeight  = Math.abs(leftEyeBottom.y - leftEyeTop.y) || 1;
+    const rightEyeHeight = Math.abs(rightEyeBottom.y - rightEyeTop.y) || 1;
+
+    const leftIrisY  = (leftIris.y - leftEyeTop.y) / leftEyeHeight;
+    const rightIrisY = (rightIris.y - rightEyeTop.y) / rightEyeHeight;
+    const avgIrisY = (leftIrisY + rightIrisY) / 2;
+
+    // Head pose: use nose-forehead-chin axis for vertical head tilt
+    const faceHeight = Math.abs(chin.y - forehead.y) || 1;
+    const noseRelY = (noseTip.y - forehead.y) / faceHeight;
+
+    // Combine iris gaze + head pose for vertical estimation
+    // Head tilt contributes significantly to where the user is looking
+    const gazeX = Math.max(0, Math.min(1, 1 - avgIrisX)); // Mirror for webcam
+    const gazeY = Math.max(0, Math.min(1, noseRelY * 0.6 + avgIrisY * 0.4));
+
+    return { x: gazeX, y: gazeY };
+  }
+
+  // Throttled face detection loop (~15fps)
+  let lastDetectTime = 0;
+  const DETECT_INTERVAL = 66; // ~15fps
+
+  async function detectLoop() {
+    if (!gazeLoopRunning || !faceModel || !videoEl) return;
+
+    const now = performance.now();
+    if (now - lastDetectTime >= DETECT_INTERVAL) {
+      lastDetectTime = now;
+      try {
+        const faces = await faceModel.estimateFaces(videoEl, { flipHorizontal: false });
+        if (faces.length > 0) {
+          const gaze = estimateGaze(faces[0].keypoints);
+          if (gaze) {
+            // Apply calibration offset if available
+            const offset = getCalibrationOffset(gaze);
+            state.gazeX = Math.max(0, Math.min(1, gaze.x + offset.x));
+            state.gazeY = Math.max(0, Math.min(1, gaze.y + offset.y));
+          }
+        }
+      } catch (e) {
+        // Silently skip frame errors
+      }
+    }
+
+    gazeAnimFrame = requestAnimationFrame(detectLoop);
+  }
+
+  // Simple calibration: average offset between expected and actual gaze
+  function addCalibrationPoint(screenX, screenY) {
+    calibrationData.push({
+      screenX: screenX / window.innerWidth,
+      screenY: screenY / window.innerHeight,
+      gazeX: state.gazeX,
+      gazeY: state.gazeY,
+    });
+  }
+
+  function getCalibrationOffset(gaze) {
+    if (calibrationData.length === 0) return { x: 0, y: 0 };
+    let totalDx = 0, totalDy = 0;
+    for (const pt of calibrationData) {
+      totalDx += (pt.screenX - pt.gazeX);
+      totalDy += (pt.screenY - pt.gazeY);
+    }
+    return {
+      x: totalDx / calibrationData.length,
+      y: totalDy / calibrationData.length,
+    };
   }
 
   // Gaze-driven scroll loop
@@ -1281,6 +1424,7 @@ html, body {
   $btnEye.addEventListener('click', async () => {
     if (state.eyeEnabled) {
       state.eyeEnabled = false;
+      gazeLoopRunning = false;
       stopEyeTracking();
       $eyeDot.className = '';
       $eyeLabel.textContent = 'Eye Off';
@@ -1289,17 +1433,25 @@ html, body {
       // Show calibration if not done
       if (!state.calibrated) {
         $eyeDot.className = 'calibrating';
-        $eyeLabel.textContent = 'Calibrating';
-        setupCalibration();
-        $calOverlay.classList.remove('hidden');
+        $eyeLabel.textContent = 'Loading model...';
+        $btnEye.style.pointerEvents = 'none';
 
         const started = await startEyeTracking();
         if (!started) {
           $eyeDot.className = '';
           $eyeLabel.textContent = 'Eye Off';
-          $calOverlay.classList.add('hidden');
+          $btnEye.style.pointerEvents = '';
           return;
         }
+
+        // Start detection loop during calibration so gaze data is available
+        gazeLoopRunning = true;
+        detectLoop();
+
+        $eyeLabel.textContent = 'Calibrating';
+        $btnEye.style.pointerEvents = '';
+        setupCalibration();
+        $calOverlay.classList.remove('hidden');
 
         // Wait for calibration to complete
         await new Promise(resolve => {
@@ -1313,6 +1465,8 @@ html, body {
       } else {
         const started = await startEyeTracking();
         if (!started) return;
+        gazeLoopRunning = true;
+        detectLoop();
       }
 
       state.eyeEnabled = true;
