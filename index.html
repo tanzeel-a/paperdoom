@@ -1,0 +1,1413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PaperDoom — Eye-Tracking Academic Paper Scroller</title>
+<script src="https://webgazer.cs.brown.edu/webgazer.js" defer></script>
+<style>
+/* ============================================================
+   CSS RESET & VARIABLES
+   ============================================================ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #000000;
+  --card-bg: #0d0d0d;
+  --card-border: #1a1a1a;
+  --text: #e8e8e8;
+  --text-dim: #888888;
+  --accent: #6c9fff;
+  --accent-hover: #8ab4ff;
+  --accent-glow: rgba(108, 159, 255, 0.15);
+  --save-color: #ff6c6c;
+  --success: #4cdf8b;
+  --warning: #ffb86c;
+  --radius: 16px;
+  --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ============================================================
+   HUD — Top Status Bar
+   ============================================================ */
+#hud {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.92) 60%, transparent);
+  pointer-events: none;
+}
+#hud > * { pointer-events: auto; }
+
+#hud-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+#app-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, var(--accent), #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+#paper-counter {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+#hud-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hud-btn {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: var(--transition);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hud-btn:hover { background: rgba(255,255,255,0.1); }
+.hud-btn.active { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); }
+
+#eye-status-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: background 0.3s;
+}
+#eye-status-dot.active { background: var(--success); box-shadow: 0 0 6px var(--success); }
+#eye-status-dot.calibrating { background: var(--warning); box-shadow: 0 0 6px var(--warning); animation: pulse 1s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ============================================================
+   SEARCH BAR
+   ============================================================ */
+#search-bar {
+  position: fixed;
+  top: 52px; left: 50%; transform: translateX(-50%);
+  z-index: 999;
+  width: min(420px, calc(100% - 40px));
+}
+#search-input {
+  width: 100%;
+  padding: 10px 18px 10px 40px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 24px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: var(--transition);
+}
+#search-input:focus {
+  background: rgba(255,255,255,0.08);
+  border-color: var(--accent);
+  box-shadow: 0 0 20px var(--accent-glow);
+}
+#search-icon {
+  position: absolute;
+  left: 14px; top: 50%; transform: translateY(-50%);
+  color: var(--text-dim);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+/* ============================================================
+   SCROLL CONTAINER & PAPER CARDS
+   ============================================================ */
+#feed-container {
+  height: 100vh;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+#feed-container::-webkit-scrollbar { display: none; }
+
+.paper-card {
+  height: 100vh;
+  scroll-snap-align: start;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 110px 20px 30px;
+  opacity: 0;
+  transform: translateY(30px);
+  animation: cardFadeIn 0.6s ease forwards;
+}
+
+@keyframes cardFadeIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card-inner {
+  width: min(600px, 100%);
+  max-height: calc(100vh - 150px);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 30px 28px;
+  overflow-y: auto;
+  position: relative;
+  transition: var(--transition);
+  scrollbar-width: thin;
+  scrollbar-color: var(--card-border) transparent;
+}
+.card-inner:hover {
+  border-color: rgba(255,255,255,0.12);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+}
+
+.card-source {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent);
+  background: var(--accent-glow);
+  padding: 4px 10px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.35;
+  margin-bottom: 12px;
+  letter-spacing: -0.3px;
+}
+
+.card-authors {
+  font-size: 14px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.card-date {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 20px;
+  opacity: 0.7;
+}
+
+.card-abstract {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #c0c0c0;
+  margin-bottom: 16px;
+  position: relative;
+}
+.card-abstract.collapsed {
+  max-height: 4.8em; /* ~3 lines */
+  overflow: hidden;
+}
+.card-abstract.collapsed::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 1.5em;
+  background: linear-gradient(to bottom, transparent, var(--card-bg));
+}
+
+.expand-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 24px;
+  transition: color 0.2s;
+}
+.expand-btn:hover { color: var(--accent-hover); }
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  text-decoration: none;
+}
+.action-btn:hover { background: rgba(255,255,255,0.08); }
+.action-btn.saved {
+  border-color: var(--save-color);
+  color: var(--save-color);
+  background: rgba(255, 108, 108, 0.1);
+}
+.action-btn.pdf-link { color: var(--accent); border-color: rgba(108,159,255,0.3); }
+.action-btn.pdf-link:hover { background: var(--accent-glow); }
+
+/* ============================================================
+   GAZE INDICATOR DOT
+   ============================================================ */
+#gaze-dot {
+  position: fixed;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(108,159,255,0.6), rgba(108,159,255,0.15));
+  border: 1px solid rgba(108,159,255,0.4);
+  pointer-events: none;
+  z-index: 9999;
+  transition: top 0.08s linear, left 0.08s linear, opacity 0.3s;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+}
+#gaze-dot.visible { opacity: 1; }
+
+/* Scroll zone indicators */
+#scroll-zones {
+  position: fixed;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 998;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+#scroll-zones.visible { opacity: 1; }
+
+.zone-indicator {
+  width: 4px;
+  height: 30px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.08);
+  transition: background 0.2s;
+}
+.zone-indicator.active-up { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.zone-indicator.active-pause { background: var(--success); }
+.zone-indicator.active-down { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+/* ============================================================
+   CALIBRATION OVERLAY
+   ============================================================ */
+#calibration-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.96);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.5s;
+}
+#calibration-overlay.hidden { opacity: 0; pointer-events: none; }
+
+#cal-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+#cal-subtitle {
+  font-size: 15px;
+  color: var(--text-dim);
+  margin-bottom: 40px;
+  text-align: center;
+  max-width: 400px;
+  line-height: 1.6;
+}
+
+#cal-grid {
+  position: relative;
+  width: min(500px, 80vw);
+  height: min(500px, 80vh);
+}
+
+.cal-dot {
+  position: absolute;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: rgba(108,159,255,0.2);
+  border: 2px solid var(--accent);
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cal-dot:hover {
+  background: rgba(108,159,255,0.4);
+  transform: scale(1.2);
+}
+.cal-dot.clicked {
+  background: var(--success);
+  border-color: var(--success);
+  transform: scale(0.8);
+}
+.cal-dot.done {
+  background: var(--success);
+  border-color: var(--success);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+#cal-progress {
+  margin-top: 30px;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+#cal-skip {
+  margin-top: 16px;
+  background: none;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text-dim);
+  padding: 8px 20px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: var(--transition);
+}
+#cal-skip:hover { color: var(--text); border-color: rgba(255,255,255,0.3); }
+
+/* ============================================================
+   HOW IT WORKS OVERLAY
+   ============================================================ */
+#how-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(10px);
+  transition: opacity 0.4s;
+}
+#how-overlay.hidden { opacity: 0; pointer-events: none; }
+
+#how-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 40px;
+  max-width: 480px;
+  width: calc(100% - 40px);
+}
+#how-card h2 {
+  font-size: 22px;
+  margin-bottom: 20px;
+  background: linear-gradient(135deg, var(--accent), #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.how-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.how-icon {
+  font-size: 24px;
+  min-width: 36px;
+  text-align: center;
+}
+.how-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #c0c0c0;
+}
+.how-text strong { color: var(--text); }
+#how-dismiss {
+  margin-top: 24px;
+  width: 100%;
+  padding: 12px;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+#how-dismiss:hover { background: var(--accent-hover); }
+
+/* ============================================================
+   SAVED DRAWER
+   ============================================================ */
+#saved-drawer {
+  position: fixed;
+  top: 0; right: -380px;
+  width: 380px;
+  max-width: 100vw;
+  height: 100vh;
+  background: #0a0a0a;
+  border-left: 1px solid var(--card-border);
+  z-index: 9998;
+  transition: right 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-y: auto;
+  padding: 24px;
+}
+#saved-drawer.open { right: 0; }
+
+#saved-drawer h3 {
+  font-size: 18px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#close-drawer {
+  background: none; border: none;
+  color: var(--text-dim);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 4px;
+}
+#close-drawer:hover { color: var(--text); }
+
+.saved-item {
+  padding: 14px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.saved-item:hover { background: rgba(255,255,255,0.06); }
+.saved-item-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.saved-item-authors { font-size: 12px; color: var(--text-dim); }
+.saved-item-remove {
+  float: right;
+  background: none; border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+}
+
+#no-saved {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 14px;
+  margin-top: 60px;
+}
+
+/* ============================================================
+   DRAWER BACKDROP
+   ============================================================ */
+#drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 9997;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+#drawer-backdrop.visible { opacity: 1; pointer-events: auto; }
+
+/* ============================================================
+   LOADING & EMPTY STATES
+   ============================================================ */
+#loading-spinner {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  display: none;
+}
+#loading-spinner.visible { display: block; }
+
+.spinner {
+  width: 28px; height: 28px;
+  border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#empty-state {
+  display: none;
+  height: 100vh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 20px;
+}
+#empty-state.visible { display: flex; }
+#empty-state h3 { font-size: 20px; color: var(--text); margin-bottom: 8px; }
+#empty-state p { font-size: 14px; max-width: 300px; line-height: 1.6; }
+
+#error-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%; transform: translateX(-50%);
+  background: rgba(255, 88, 88, 0.15);
+  border: 1px solid rgba(255, 88, 88, 0.3);
+  color: #ff8888;
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 13px;
+  z-index: 9999;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+#error-toast.visible { opacity: 1; }
+
+/* ============================================================
+   MOBILE
+   ============================================================ */
+#mobile-notice {
+  display: none;
+  position: fixed;
+  bottom: 20px; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+  z-index: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  #mobile-notice { display: block; }
+  .card-inner { padding: 28px 20px; }
+  .card-title { font-size: 18px; }
+  #saved-drawer { width: 100vw; }
+}
+
+/* ============================================================
+   WEBCAM PREVIEW (small, from WebGazer)
+   ============================================================ */
+#webgazerVideoFeed { display: none !important; }
+#webgazerVideoCanvas { display: none !important; }
+#webgazerFaceOverlay { display: none !important; }
+#webgazerFaceFeedbackBox { display: none !important; }
+#webgazerGazeDot { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- ========== HUD ========== -->
+<header id="hud">
+  <div id="hud-left">
+    <span id="app-title">PaperDoom</span>
+    <span id="paper-counter">0 / 0</span>
+  </div>
+  <div id="hud-right">
+    <button class="hud-btn" id="btn-how" title="How it works">?</button>
+    <button class="hud-btn" id="btn-saved" title="Saved papers">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+      Saved
+    </button>
+    <button class="hud-btn" id="btn-eye-toggle">
+      <span id="eye-status-dot"></span>
+      <span id="eye-label">Eye Off</span>
+    </button>
+  </div>
+</header>
+
+<!-- ========== SEARCH ========== -->
+<div id="search-bar">
+  <span id="search-icon">&#128269;</span>
+  <input type="text" id="search-input" placeholder="Search topics... (e.g. machine learning, quantum)" autocomplete="off">
+</div>
+
+<!-- ========== FEED ========== -->
+<div id="feed-container"></div>
+
+<!-- ========== LOADING / EMPTY / ERROR ========== -->
+<div id="loading-spinner"><div class="spinner"></div></div>
+<div id="empty-state">
+  <h3>No papers found</h3>
+  <p>Try a different search term or check your connection.</p>
+</div>
+<div id="error-toast"></div>
+
+<!-- ========== GAZE DOT ========== -->
+<div id="gaze-dot"></div>
+
+<!-- ========== SCROLL ZONE INDICATORS ========== -->
+<div id="scroll-zones">
+  <div class="zone-indicator" id="zone-up"></div>
+  <div class="zone-indicator" id="zone-pause"></div>
+  <div class="zone-indicator" id="zone-down"></div>
+</div>
+
+<!-- ========== MOBILE NOTICE ========== -->
+<div id="mobile-notice">Eye-tracking requires desktop + webcam</div>
+
+<!-- ========== CALIBRATION OVERLAY ========== -->
+<div id="calibration-overlay" class="hidden">
+  <div id="cal-title">Calibrate Eye Tracking</div>
+  <div id="cal-subtitle">Click each dot while looking directly at it. This teaches the system where your eyes are pointing. Takes about 30 seconds.</div>
+  <div id="cal-grid"></div>
+  <div id="cal-progress">0 / 9 points</div>
+  <button id="cal-skip">Skip calibration</button>
+</div>
+
+<!-- ========== HOW IT WORKS OVERLAY ========== -->
+<div id="how-overlay" class="hidden">
+  <div id="how-card">
+    <h2>How PaperDoom Works</h2>
+    <div class="how-step">
+      <div class="how-icon">&#128064;</div>
+      <div class="how-text"><strong>Look down</strong> to scroll to the next paper. The bottom 25% of your screen triggers a smooth downward scroll.</div>
+    </div>
+    <div class="how-step">
+      <div class="how-icon">&#11014;&#65039;</div>
+      <div class="how-text"><strong>Look up</strong> to go back. The top 25% scrolls upward.</div>
+    </div>
+    <div class="how-step">
+      <div class="how-icon">&#9209;&#65039;</div>
+      <div class="how-text"><strong>Look at the center</strong> to pause and read. The middle 50% keeps you on the current paper.</div>
+    </div>
+    <div class="how-step">
+      <div class="how-icon">&#9000;&#65039;</div>
+      <div class="how-text"><strong>Keyboard fallback:</strong> Use <strong>Arrow keys</strong> or <strong>J/K</strong> to scroll when eye-tracking is off.</div>
+    </div>
+    <div class="how-step">
+      <div class="how-icon">&#128278;</div>
+      <div class="how-text"><strong>Calibrate first:</strong> Click the 9 dots while looking at them so the tracker learns your gaze.</div>
+    </div>
+    <button id="how-dismiss">Got it, let's go!</button>
+  </div>
+</div>
+
+<!-- ========== SAVED DRAWER ========== -->
+<div id="drawer-backdrop"></div>
+<div id="saved-drawer">
+  <h3>
+    Saved Papers
+    <button id="close-drawer">&times;</button>
+  </h3>
+  <div id="saved-list"></div>
+  <div id="no-saved">No saved papers yet. Tap the bookmark icon on any paper card.</div>
+</div>
+
+<!-- ========== MAIN SCRIPT ========== -->
+<script>
+(function () {
+  'use strict';
+
+  /* ==========================================================
+     STATE
+     ========================================================== */
+  const state = {
+    papers: [],
+    currentIndex: 0,
+    loading: false,
+    query: '',
+    offset: 0,
+    batchSize: 20,
+    hasMore: true,
+    saved: JSON.parse(localStorage.getItem('paperdoom_saved') || '[]'),
+    eyeEnabled: false,
+    calibrated: false,
+    gazeY: 0.5,          // normalized 0..1
+    gazeX: 0.5,
+    scrollVelocity: 0,
+    drawerOpen: false,
+    firstVisit: !localStorage.getItem('paperdoom_visited'),
+  };
+
+  /* ==========================================================
+     DOM REFS
+     ========================================================== */
+  const $feed       = document.getElementById('feed-container');
+  const $counter    = document.getElementById('paper-counter');
+  const $spinner    = document.getElementById('loading-spinner');
+  const $empty      = document.getElementById('empty-state');
+  const $errorToast = document.getElementById('error-toast');
+  const $gazeDot    = document.getElementById('gaze-dot');
+  const $calOverlay = document.getElementById('calibration-overlay');
+  const $calGrid    = document.getElementById('cal-grid');
+  const $calProg    = document.getElementById('cal-progress');
+  const $calSkip    = document.getElementById('cal-skip');
+  const $howOverlay = document.getElementById('how-overlay');
+  const $howDismiss = document.getElementById('how-dismiss');
+  const $searchInput= document.getElementById('search-input');
+  const $btnEye     = document.getElementById('btn-eye-toggle');
+  const $eyeDot     = document.getElementById('eye-status-dot');
+  const $eyeLabel   = document.getElementById('eye-label');
+  const $btnSaved   = document.getElementById('btn-saved');
+  const $btnHow     = document.getElementById('btn-how');
+  const $drawer     = document.getElementById('saved-drawer');
+  const $drawerBack = document.getElementById('drawer-backdrop');
+  const $closeDrawer= document.getElementById('close-drawer');
+  const $savedList  = document.getElementById('saved-list');
+  const $noSaved    = document.getElementById('no-saved');
+  const $scrollZones= document.getElementById('scroll-zones');
+  const $zoneUp     = document.getElementById('zone-up');
+  const $zonePause  = document.getElementById('zone-pause');
+  const $zoneDown   = document.getElementById('zone-down');
+
+  /* ==========================================================
+     HELPERS
+     ========================================================== */
+  function showError(msg) {
+    $errorToast.textContent = msg;
+    $errorToast.classList.add('visible');
+    setTimeout(() => $errorToast.classList.remove('visible'), 4000);
+  }
+
+  function persistSaved() {
+    localStorage.setItem('paperdoom_saved', JSON.stringify(state.saved));
+  }
+
+  function isSaved(id) {
+    return state.saved.some(s => s.id === id);
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function truncateAuthors(authors, max = 4) {
+    if (!authors || authors.length === 0) return 'Unknown authors';
+    const names = authors.slice(0, max).join(', ');
+    return authors.length > max ? names + ` +${authors.length - max} more` : names;
+  }
+
+  function formatDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+      return new Date(dateStr).toLocaleDateString('en-US', {
+        year: 'numeric', month: 'short', day: 'numeric'
+      });
+    } catch { return dateStr; }
+  }
+
+  /* ==========================================================
+     arXiv API
+     ========================================================== */
+  async function fetchPapers(query, start = 0, maxResults = 20) {
+    // Use OpenAlex API (CORS-friendly, no auth required)
+    const page = Math.floor(start / maxResults) + 1;
+    const searchFilter = query.trim()
+      ? `&search=${encodeURIComponent(query.trim())}`
+      : '&filter=concepts.id:C154945302|C119857082|C41008148,type:article'; // AI, ML, CS articles only
+
+    const url = `https://api.openalex.org/works?per_page=${maxResults}&page=${page}${searchFilter}&sort=publication_date:desc&mailto=paperdoom@demo.app`;
+
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`OpenAlex API error: ${resp.status}`);
+
+    const data = await resp.json();
+    const results = data.results || [];
+
+    return results.map(work => {
+      const authors = (work.authorships || []).map(a =>
+        a.author?.display_name || 'Unknown'
+      );
+
+      // Build a PDF link: prefer open access, fallback to DOI
+      let pdfLink = '';
+      if (work.open_access?.oa_url) {
+        pdfLink = work.open_access.oa_url;
+      } else if (work.primary_location?.landing_page_url) {
+        pdfLink = work.primary_location.landing_page_url;
+      } else if (work.doi) {
+        pdfLink = work.doi.startsWith('http') ? work.doi : `https://doi.org/${work.doi}`;
+      }
+
+      // Source / journal name
+      const source = work.primary_location?.source?.display_name
+        || work.type || 'OpenAlex';
+
+      // Abstract: OpenAlex stores inverted index, reconstruct it
+      let abstract = '';
+      if (work.abstract_inverted_index) {
+        const entries = [];
+        for (const [word, positions] of Object.entries(work.abstract_inverted_index)) {
+          for (const pos of positions) {
+            entries.push({ pos, word });
+          }
+        }
+        entries.sort((a, b) => a.pos - b.pos);
+        abstract = entries.map(e => e.word).join(' ')
+          .replace(/<[^>]*>/g, ''); // strip any HTML tags
+      }
+
+      return {
+        id: work.id || '',
+        title: work.title || 'Untitled',
+        authors,
+        abstract,
+        published: work.publication_date || '',
+        categories: (work.concepts || []).slice(0, 3).map(c => c.display_name),
+        source,
+        pdfLink,
+      };
+    });
+  }
+
+  /* ==========================================================
+     RENDER PAPER CARDS
+     ========================================================== */
+  function renderCard(paper, index) {
+    const saved = isSaved(paper.id);
+    const card = document.createElement('div');
+    card.className = 'paper-card';
+    card.dataset.index = index;
+    card.style.animationDelay = `${(index % 5) * 0.08}s`;
+
+    card.innerHTML = `
+      <div class="card-inner">
+        <div class="card-source">${escapeHtml(paper.source)}</div>
+        <h2 class="card-title">${escapeHtml(paper.title)}</h2>
+        <div class="card-authors">${escapeHtml(truncateAuthors(paper.authors))}</div>
+        <div class="card-date">${formatDate(paper.published)}</div>
+        <div class="card-abstract collapsed" data-id="${escapeHtml(paper.id)}">${escapeHtml(paper.abstract)}</div>
+        <button class="expand-btn" data-id="${escapeHtml(paper.id)}">Show more</button>
+        <div class="card-actions">
+          <a href="${escapeHtml(paper.pdfLink)}" target="_blank" rel="noopener" class="action-btn pdf-link">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            PDF
+          </a>
+          <button class="action-btn save-btn ${saved ? 'saved' : ''}" data-id="${escapeHtml(paper.id)}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="${saved ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+            ${saved ? 'Saved' : 'Save'}
+          </button>
+        </div>
+      </div>
+    `;
+
+    return card;
+  }
+
+  function renderFeed(papers, append = false) {
+    if (!append) {
+      $feed.innerHTML = '';
+    }
+
+    papers.forEach((paper, i) => {
+      const globalIndex = append ? state.papers.length - papers.length + i : i;
+      $feed.appendChild(renderCard(paper, globalIndex));
+    });
+
+    if (state.papers.length === 0) {
+      $empty.classList.add('visible');
+    } else {
+      $empty.classList.remove('visible');
+    }
+
+    updateCounter();
+  }
+
+  /* ==========================================================
+     INFINITE SCROLL & LOADING
+     ========================================================== */
+  async function loadPapers(query = '', reset = false) {
+    if (state.loading) return;
+    if (!reset && !state.hasMore) return;
+
+    if (reset) {
+      state.papers = [];
+      state.offset = 0;
+      state.hasMore = true;
+      $feed.innerHTML = '';
+    }
+
+    state.loading = true;
+    $spinner.classList.add('visible');
+
+    try {
+      const batch = await fetchPapers(query, state.offset, state.batchSize);
+
+      if (batch.length < state.batchSize) {
+        state.hasMore = false;
+      }
+
+      state.papers.push(...batch);
+      state.offset += batch.length;
+
+      renderFeed(batch, !reset ? state.papers.length > batch.length : false);
+
+      if (state.papers.length === 0) {
+        $empty.classList.add('visible');
+      }
+    } catch (err) {
+      console.error('Failed to fetch papers:', err);
+      showError('Failed to load papers. Check connection or try again.');
+      if (state.papers.length === 0) {
+        $empty.classList.add('visible');
+      }
+    } finally {
+      state.loading = false;
+      $spinner.classList.remove('visible');
+    }
+  }
+
+  // Detect when user nears the bottom
+  $feed.addEventListener('scroll', () => {
+    const { scrollTop, scrollHeight, clientHeight } = $feed;
+    const threshold = clientHeight * 1.5;
+
+    if (scrollHeight - scrollTop - clientHeight < threshold) {
+      loadPapers(state.query);
+    }
+
+    // Update current index
+    const newIndex = Math.round(scrollTop / clientHeight);
+    if (newIndex !== state.currentIndex) {
+      state.currentIndex = newIndex;
+      updateCounter();
+    }
+  });
+
+  function updateCounter() {
+    $counter.textContent = `${state.currentIndex + 1} / ${state.papers.length}`;
+  }
+
+  /* ==========================================================
+     SEARCH
+     ========================================================== */
+  let searchTimeout = null;
+  $searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      state.query = $searchInput.value;
+      loadPapers(state.query, true);
+    }, 600);
+  });
+
+  /* ==========================================================
+     CARD INTERACTIONS (event delegation)
+     ========================================================== */
+  $feed.addEventListener('click', (e) => {
+    // Expand/collapse abstract
+    const expandBtn = e.target.closest('.expand-btn');
+    if (expandBtn) {
+      const id = expandBtn.dataset.id;
+      const abstract = $feed.querySelector(`.card-abstract[data-id="${CSS.escape(id)}"]`);
+      if (abstract) {
+        const collapsed = abstract.classList.toggle('collapsed');
+        expandBtn.textContent = collapsed ? 'Show more' : 'Show less';
+      }
+      return;
+    }
+
+    // Save/unsave
+    const saveBtn = e.target.closest('.save-btn');
+    if (saveBtn) {
+      const id = saveBtn.dataset.id;
+      const paper = state.papers.find(p => p.id === id);
+      if (!paper) return;
+
+      if (isSaved(id)) {
+        state.saved = state.saved.filter(s => s.id !== id);
+        saveBtn.classList.remove('saved');
+        saveBtn.querySelector('svg').setAttribute('fill', 'none');
+        saveBtn.querySelector('svg').nextSibling.textContent = ' Save';
+      } else {
+        state.saved.push({ id: paper.id, title: paper.title, authors: paper.authors });
+        saveBtn.classList.add('saved');
+        saveBtn.querySelector('svg').setAttribute('fill', 'currentColor');
+        saveBtn.querySelector('svg').nextSibling.textContent = ' Saved';
+      }
+      persistSaved();
+      renderSavedDrawer();
+    }
+  });
+
+  /* ==========================================================
+     SAVED DRAWER
+     ========================================================== */
+  function renderSavedDrawer() {
+    $savedList.innerHTML = '';
+    $noSaved.style.display = state.saved.length === 0 ? 'block' : 'none';
+
+    state.saved.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'saved-item';
+      div.innerHTML = `
+        <button class="saved-item-remove" data-id="${escapeHtml(item.id)}">&times;</button>
+        <div class="saved-item-title">${escapeHtml(item.title)}</div>
+        <div class="saved-item-authors">${escapeHtml(truncateAuthors(item.authors, 2))}</div>
+      `;
+      $savedList.appendChild(div);
+    });
+  }
+
+  function toggleDrawer(open) {
+    state.drawerOpen = open;
+    $drawer.classList.toggle('open', open);
+    $drawerBack.classList.toggle('visible', open);
+    if (open) renderSavedDrawer();
+  }
+
+  $btnSaved.addEventListener('click', () => toggleDrawer(true));
+  $closeDrawer.addEventListener('click', () => toggleDrawer(false));
+  $drawerBack.addEventListener('click', () => toggleDrawer(false));
+
+  $savedList.addEventListener('click', (e) => {
+    const removeBtn = e.target.closest('.saved-item-remove');
+    if (removeBtn) {
+      const id = removeBtn.dataset.id;
+      state.saved = state.saved.filter(s => s.id !== id);
+      persistSaved();
+      renderSavedDrawer();
+
+      // Update card button if visible
+      const cardBtn = $feed.querySelector(`.save-btn[data-id="${CSS.escape(id)}"]`);
+      if (cardBtn) {
+        cardBtn.classList.remove('saved');
+        cardBtn.querySelector('svg').setAttribute('fill', 'none');
+      }
+    }
+  });
+
+  /* ==========================================================
+     HOW IT WORKS OVERLAY
+     ========================================================== */
+  function showHow() { $howOverlay.classList.remove('hidden'); }
+  function hideHow() {
+    $howOverlay.classList.add('hidden');
+    localStorage.setItem('paperdoom_visited', '1');
+  }
+
+  $howDismiss.addEventListener('click', hideHow);
+  $howOverlay.addEventListener('click', (e) => { if (e.target === $howOverlay) hideHow(); });
+  $btnHow.addEventListener('click', showHow);
+
+  /* ==========================================================
+     CALIBRATION
+     ========================================================== */
+  const calPositions = [
+    [0, 0], [50, 0], [100, 0],
+    [0, 50], [50, 50], [100, 50],
+    [0, 100], [50, 100], [100, 100],
+  ];
+  let calClicked = 0;
+  const CLICKS_PER_DOT = 3;
+
+  function setupCalibration() {
+    $calGrid.innerHTML = '';
+    calClicked = 0;
+    $calProg.textContent = '0 / 9 points';
+
+    calPositions.forEach(([x, y], i) => {
+      const dot = document.createElement('div');
+      dot.className = 'cal-dot';
+      dot.dataset.index = i;
+      dot.dataset.clicks = '0';
+      dot.style.left = `calc(${x}% - 14px)`;
+      dot.style.top = `calc(${y}% - 14px)`;
+      $calGrid.appendChild(dot);
+    });
+  }
+
+  $calGrid.addEventListener('click', (e) => {
+    const dot = e.target.closest('.cal-dot');
+    if (!dot || dot.classList.contains('done')) return;
+
+    let clicks = parseInt(dot.dataset.clicks) + 1;
+    dot.dataset.clicks = clicks;
+    dot.classList.add('clicked');
+    setTimeout(() => dot.classList.remove('clicked'), 200);
+
+    if (clicks >= CLICKS_PER_DOT) {
+      dot.classList.add('done');
+      calClicked++;
+      $calProg.textContent = `${calClicked} / 9 points`;
+
+      if (calClicked >= 9) {
+        setTimeout(() => {
+          $calOverlay.classList.add('hidden');
+          state.calibrated = true;
+        }, 400);
+      }
+    }
+  });
+
+  $calSkip.addEventListener('click', () => {
+    $calOverlay.classList.add('hidden');
+    state.calibrated = true;
+  });
+
+  /* ==========================================================
+     EYE TRACKING (WebGazer)
+     ========================================================== */
+  let gazeAnimFrame = null;
+
+  async function startEyeTracking() {
+    if (typeof webgazer === 'undefined') {
+      showError('WebGazer.js failed to load. Check your connection.');
+      return false;
+    }
+
+    try {
+      await webgazer
+        .setGazeListener((data) => {
+          if (!data) return;
+          state.gazeX = data.x / window.innerWidth;
+          state.gazeY = data.y / window.innerHeight;
+        })
+        .setRegression('ridge')
+        .saveDataAcrossSessions(true)
+        .begin();
+
+      // Hide WebGazer's built-in UI
+      webgazer.showVideoPreview(false);
+      webgazer.showPredictionPoints(false);
+      webgazer.showFaceOverlay(false);
+      webgazer.showFaceFeedbackBox(false);
+
+      return true;
+    } catch (err) {
+      console.error('WebGazer error:', err);
+      if (err.name === 'NotAllowedError') {
+        showError('Camera permission denied. Enable it in browser settings.');
+      } else {
+        showError('Failed to start eye tracking: ' + err.message);
+      }
+      return false;
+    }
+  }
+
+  function stopEyeTracking() {
+    if (typeof webgazer !== 'undefined') {
+      try { webgazer.end(); } catch {}
+    }
+    if (gazeAnimFrame) {
+      cancelAnimationFrame(gazeAnimFrame);
+      gazeAnimFrame = null;
+    }
+    $gazeDot.classList.remove('visible');
+    $scrollZones.classList.remove('visible');
+  }
+
+  // Gaze-driven scroll loop
+  function gazeScrollLoop() {
+    if (!state.eyeEnabled) return;
+
+    const vh = window.innerHeight;
+    const y = state.gazeY;
+
+    // Update gaze dot position
+    $gazeDot.style.left = `${state.gazeX * window.innerWidth}px`;
+    $gazeDot.style.top = `${y * vh}px`;
+    $gazeDot.classList.add('visible');
+    $scrollZones.classList.add('visible');
+
+    // Reset zone indicators
+    $zoneUp.className = 'zone-indicator';
+    $zonePause.className = 'zone-indicator';
+    $zoneDown.className = 'zone-indicator';
+
+    // Determine scroll zone
+    const scrollSpeed = 6; // px per frame
+
+    if (y < 0.25) {
+      // Look up = scroll up
+      const intensity = 1 - (y / 0.25); // 0 at boundary, 1 at top
+      state.scrollVelocity = -scrollSpeed * intensity;
+      $zoneUp.classList.add('active-up');
+    } else if (y > 0.75) {
+      // Look down = scroll down
+      const intensity = (y - 0.75) / 0.25; // 0 at boundary, 1 at bottom
+      state.scrollVelocity = scrollSpeed * intensity;
+      $zoneDown.classList.add('active-down');
+    } else {
+      // Center = pause
+      state.scrollVelocity = 0;
+      $zonePause.classList.add('active-pause');
+    }
+
+    // Apply scroll
+    if (state.scrollVelocity !== 0) {
+      $feed.scrollTop += state.scrollVelocity;
+    }
+
+    gazeAnimFrame = requestAnimationFrame(gazeScrollLoop);
+  }
+
+  // Toggle eye tracking
+  $btnEye.addEventListener('click', async () => {
+    if (state.eyeEnabled) {
+      state.eyeEnabled = false;
+      stopEyeTracking();
+      $eyeDot.className = '';
+      $eyeLabel.textContent = 'Eye Off';
+      $btnEye.classList.remove('active');
+    } else {
+      // Show calibration if not done
+      if (!state.calibrated) {
+        $eyeDot.className = 'calibrating';
+        $eyeLabel.textContent = 'Calibrating';
+        setupCalibration();
+        $calOverlay.classList.remove('hidden');
+
+        const started = await startEyeTracking();
+        if (!started) {
+          $eyeDot.className = '';
+          $eyeLabel.textContent = 'Eye Off';
+          $calOverlay.classList.add('hidden');
+          return;
+        }
+
+        // Wait for calibration to complete
+        await new Promise(resolve => {
+          const check = setInterval(() => {
+            if (state.calibrated) {
+              clearInterval(check);
+              resolve();
+            }
+          }, 200);
+        });
+      } else {
+        const started = await startEyeTracking();
+        if (!started) return;
+      }
+
+      state.eyeEnabled = true;
+      $eyeDot.className = 'active';
+      $eyeLabel.textContent = 'Eye On';
+      $btnEye.classList.add('active');
+
+      // Start gaze scroll loop
+      gazeScrollLoop();
+    }
+  });
+
+  /* ==========================================================
+     KEYBOARD SCROLLING (J/K, Arrow keys)
+     ========================================================== */
+  document.addEventListener('keydown', (e) => {
+    // Don't capture when typing in search
+    if (document.activeElement === $searchInput) return;
+
+    const vh = window.innerHeight;
+
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'j':
+        e.preventDefault();
+        $feed.scrollBy({ top: vh, behavior: 'smooth' });
+        break;
+      case 'ArrowUp':
+      case 'k':
+        e.preventDefault();
+        $feed.scrollBy({ top: -vh, behavior: 'smooth' });
+        break;
+      case 'Escape':
+        if (state.drawerOpen) toggleDrawer(false);
+        if (!$howOverlay.classList.contains('hidden')) hideHow();
+        if (!$calOverlay.classList.contains('hidden')) {
+          $calOverlay.classList.add('hidden');
+          state.calibrated = true;
+        }
+        break;
+    }
+  });
+
+  /* ==========================================================
+     DOM VIRTUALIZATION — Remove far-off cards for performance
+     ========================================================== */
+  const BUFFER = 5;
+
+  function virtualizeCards() {
+    const cards = $feed.querySelectorAll('.paper-card');
+    const current = state.currentIndex;
+
+    cards.forEach((card, i) => {
+      const dist = Math.abs(i - current);
+      if (dist > BUFFER) {
+        card.style.visibility = 'hidden';
+        card.style.contentVisibility = 'auto';
+      } else {
+        card.style.visibility = '';
+        card.style.contentVisibility = '';
+      }
+    });
+  }
+
+  // Throttled virtualization on scroll
+  let virtTimer = null;
+  $feed.addEventListener('scroll', () => {
+    if (virtTimer) return;
+    virtTimer = setTimeout(() => {
+      virtualizeCards();
+      virtTimer = null;
+    }, 200);
+  });
+
+  /* ==========================================================
+     INIT
+     ========================================================== */
+  function init() {
+    // Show "how it works" on first visit
+    if (state.firstVisit) {
+      showHow();
+    }
+
+    // Load initial papers
+    loadPapers('');
+  }
+
+  // Wait for DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+</script>
+</body>
+</html>
